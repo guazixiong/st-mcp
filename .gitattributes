@@ -1,0 +1,9 @@
+# Shell 与源码在 Linux 现场运行，必须 LF；Windows 脚本保持 CRLF。
+*.sh text eol=lf
+*.py text eol=lf
+*.conf text eol=lf
+*.md text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.whl binary
+*.so binary
