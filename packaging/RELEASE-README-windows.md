@@ -8,7 +8,7 @@
 
 ## 快速开始
 
-1. 解压 `st-mcp-0.1.0-windows-x64.zip`
+1. 解压 `st-mcp-{VER}-windows-x64.zip`
 2. 双击 `一键启动.bat`（默认 `http://0.0.0.0:8100/mcp`）
 3. 浏览器打开 `http://127.0.0.1:8100/healthz`，应返回
    `{"ok": true, "tenants": 0, "dynamic": true}`
@@ -45,5 +45,5 @@ URL 固定为 `http://<服务器IP>:8100/mcp`，目标库写在请求头里：
 | `config\st-mcp.conf` | 运行参数 |
 | `scripts\` | 启动、验收、探针 |
 | `source\` | 完整源码 |
-| `dist\` | `st_mcp-0.1.0-py3-none-any.whl` |
+| `dist\` | `st_mcp-{VER}-py3-none-any.whl` |
 | `一键启动.bat` / `验收检查.bat` | 入口 |

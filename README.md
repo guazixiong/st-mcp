@@ -1,197 +1,298 @@
-# ST-MCP：神通数据库（ShenTong / Oscar）的 MCP 服务端
+# ST-MCP
 
-用自然语言查神通库。跑一个 Docker 容器，把数据库暴露成 10 个 MCP 工具，
-Qoder / Claude Desktop 等客户端填一个 URL 就能连。
+**MCP server for ShenTong (OSCAR) databases.** It exposes a ShenTong database as
+10 Model Context Protocol tools, so clients such as Qoder, Claude Desktop or any
+MCP SDK can inspect schemas, run SQL and read performance data over one HTTP
+endpoint.
 
-    list_schemas · list_objects · get_object_details · execute_sql · get_performance_metrics
-    explain_query · analyze_db_health · get_top_queries · analyze_workload_indexes · analyze_query_indexes
+English | [简体中文](README.zh-CN.md)
 
-为**完全断网**的环境设计：整条链路（装库 → 建镜像 → 起服务 → 自验收 19 项）不访问外网，
-也不需要 pip 源。已在麒麟 V10 SP3 / aarch64 的真机上从空机器跑到 `19 PASS / 0 FAIL / 0 SKIP`
-并跨机接入过客户端。
+- One `streamable-http` endpoint (`POST /mcp`) or legacy `sse` / `stdio`.
+- **Dynamic connections**: each request chooses the target database with headers
+  or URL parameters — one process can serve many databases.
+- Optional tenant registry: a bearer token maps to a fixed database account.
+- Offline release bundles for Linux arm64, Linux x86_64 and Windows x64.
 
-> 发布前请先读 [`NOTICE.md`](NOTICE.md)：`src/` 是在厂商交付代码基础上改造的，
-> 且本仓库**不含**数据库介质、闭源驱动与 `libaci.so`（要自备，见 `vendor/PUT-FILES-HERE.md`）。
-
-
-## 快速开始
-
-**1) 准备二进制**（联网机器上做，或按 `vendor/PUT-FILES-HERE.md` 手工放）
-
-```sh
-git clone <本仓库> st-mcp && cd st-mcp
-sh tools/fetch-offline-deps.sh          # 开源轮子 + 可选的基础镜像归档
-# 再手工放：wheels/STPython-*-cp311-cp311-linux_aarch64.whl、aci/libaci.so
+```
+list_schemas · list_objects · get_object_details · execute_sql
+get_performance_metrics · explain_query · analyze_db_health · get_top_queries
+analyze_workload_indexes · analyze_query_indexes
 ```
 
-**2) 填口令**（唯一必须手工输入的信息）
+## Requirements
+
+- A reachable ShenTong / OSCAR server (TCP port `2003` by default).
+- **Vendor driver for real SQL**: the closed-source `STPython` package and
+  `libaci.so` (Linux) / `ACI.dll` (Windows) are **not** distributed here. Without
+  them the server still starts and completes MCP handshakes, but SQL tools return
+  an error. See [`vendor/PUT-FILES-HERE.md`](vendor/PUT-FILES-HERE.md).
+- Python ≥ 3.11 if you install the wheel. The Linux bundles include a portable
+  CPython 3.11 and the Windows bundle a portable CPython 3.13, so neither needs a
+  system Python.
+- Linux glibc ≥ 2.28 (Kylin V10, RHEL 8, Debian 10 or newer) or Windows x64.
+  Docker is optional.
+
+The published `STPython` wheel targets CPython 3.11 on Linux aarch64. Other
+platforms need a matching driver build from the vendor.
+
+## Quick start from a release
+
+Every release ships five assets plus `SHA256SUMS`:
+
+| Asset | Contents |
+|---|---|
+| `st-mcp-<ver>-source.tar.gz` | Full source for the tag. |
+| `st_mcp-<ver>-py3-none-any.whl` | Universal wheel for any Python ≥ 3.11. |
+| `st-mcp-<ver>-linux-arm64.tar.gz` | Source + portable CPython + wheels + `install.sh` / `run.sh`. |
+| `st-mcp-<ver>-linux-x86_64.tar.gz` | Same for x86_64. |
+| `st-mcp-<ver>-windows-x64.zip` | Portable CPython 3.13 with the dependencies installed + start/verify scripts + source. |
+
+### Linux bundle (no Docker)
+
+```sh
+tar -xzf st-mcp-<ver>-linux-x86_64.tar.gz
+cd st-mcp-<ver>-linux-x86_64
+sh install.sh
+sh run.sh
+```
+
+`install.sh` unpacks the bundled CPython into `./python` and installs the
+open-source dependencies offline; it does not touch the system Python.
+
+`run.sh` starts the server on `0.0.0.0:8100/mcp` with dynamic connections enabled
+but restricted to `127.0.0.1:2003`. To accept other targets:
+
+```sh
+ST_DYNAMIC_ALLOW='10.0.0.0/24' ST_DYNAMIC_ALLOW_PORTS=2003 sh run.sh
+# or allow everything (only inside a trusted network):
+ST_DYNAMIC_ALLOW='*' ST_DYNAMIC_ALLOW_PORTS='*' sh run.sh
+```
+
+Check that it is alive:
+
+```sh
+curl -s http://127.0.0.1:8100/healthz
+# {"ok": true, "tenants": 0, "dynamic": true}
+```
+
+### Windows bundle
+
+Unzip and double-click `一键启动.bat` (or run `powershell -File scripts\start-server.ps1`).
+The script reads `config\st-mcp.conf`, starts `0.0.0.0:8100/mcp` in the foreground
+and prints the client URLs. Run `验收检查.bat` for a self-check
+(7 PASS / 0 FAIL / 2 SKIP without the vendor driver). To connect other database
+hosts, add them to `ST_DYNAMIC_ALLOW` in `config\st-mcp.conf`.
+
+### Wheel
+
+```sh
+python -m pip install st_mcp-<ver>-py3-none-any.whl
+ST_DYNAMIC_ENABLED=yes ST_DYNAMIC_ALLOW=127.0.0.1 \
+  st-mcp --transport streamable-http --sse-host 0.0.0.0 --sse-port 8100 --mcp-path /mcp
+```
+
+For a fixed database instead of dynamic targets, pass `--host`, `--port`,
+`--user`, `--database` and put the password in `ST_PASSWORD` (a password in
+`--password` is visible in the process list).
+
+## Client configuration
+
+Point the client at the endpoint. Most MCP clients accept custom headers:
+
+```json
+{
+  "mcpServers": {
+    "shentong": {
+      "url": "http://db-host:8100/mcp",
+      "headers": {
+        "X-ST-DB-Host": "10.0.0.21",
+        "X-ST-DB-Port": "2003",
+        "X-ST-DB-User": "APP",
+        "X-ST-DB-Password": "secret",
+        "X-ST-DB-Name": "OSRDB"
+      }
+    }
+  }
+}
+```
+
+For a server started with a fixed database and dynamic connections disabled, the
+URL alone is enough:
+
+```json
+{ "mcpServers": { "shentong": { "url": "http://db-host:8100/mcp" } } }
+```
+
+Clients that cannot set headers can put the target in the URL instead:
+
+```text
+http://db-host:8100/mcp?st_host=10.0.0.21&st_port=2003&st_user=APP&st_password=secret&st_db=OSRDB
+```
+
+## Dynamic connections
+
+A request selects its database in this order (first match wins):
+
+1. **Tenant token** — `/mcp/<token>`, `Authorization: Bearer <token>` or
+   `X-ST-Token: <token>` from the tenant registry.
+2. **Request target** — `X-ST-DB` blob, then `X-ST-DB-*` fields, then URL query.
+
+While dynamic connections are enabled, a request that carries neither is rejected
+with `401`; the server's own connection is not used as a fallback. With dynamic
+connections disabled the server always uses its own fixed connection.
+
+Target fields:
+
+| Field | Header | Query (URL) | Required | Default |
+|---|---|---|---|---|
+| Host | `X-ST-DB-Host` | `st_host` | yes | — |
+| Port | `X-ST-DB-Port` | `st_port` | no | `ST_DYNAMIC_DEFAULT_PORT` (2003) |
+| User | `X-ST-DB-User` | `st_user` | yes | — |
+| Password | `X-ST-DB-Password` | `st_password` | yes | — |
+| Database | `X-ST-DB-Name` | `st_db` | no | `ST_DYNAMIC_DEFAULT_DB` (OSRDB) |
+
+Single-value forms, useful when a client exposes only one custom header:
+
+```text
+X-ST-DB: {"host":"10.0.0.21","port":2003,"user":"APP","password":"secret","database":"OSRDB"}
+X-ST-DB: <base64url of the same JSON>          # use this when the password is not latin-1
+?st=<base64url JSON>
+```
+
+`X-ST-DB` wins over the individual headers; headers win over the query string.
+Sources are never merged. Credential headers (`X-ST-DB`, `X-ST-DB-*`) are removed
+before the MCP layer sees the request. URL parameters are not removed — they stay
+in the request URL — so prefer headers and keep the endpoint behind a trusted
+network. HTTP access logging is disabled so the query string is not written to the
+access log.
+
+Every target must pass both lists:
+
+- `ST_DYNAMIC_ALLOW` — comma-separated exact hosts, CIDR ranges or `*.suffix`;
+  `*` allows all, empty denies all.
+- `ST_DYNAMIC_ALLOW_PORTS` — comma-separated ports or `*`.
+
+Response codes for dynamic requests:
+
+| Situation | HTTP |
+|---|---|
+| Valid target (or session already bound) | `200` |
+| No target and no token | `401` |
+| Host or port not in the allow-list | `403` |
+| Missing field, bad port, malformed JSON/base64 | `400` |
+| Target valid but the database rejects the connection | `200` + `Error:` in the tool result |
+
+Each distinct target (host, port, user, password, database) gets its own pooled
+connection; `ST_MAX_TARGETS` caps the number of pools (default 16).
+
+## Configuration
+
+### Server
+
+| Variable / flag | Default | Meaning |
+|---|---|---|
+| `--transport` | `sse` (`streamable-http` in bundles) | `streamable-http`, `sse` or `stdio`. |
+| `--sse-host` (`SSE_HOST` in wrappers) | `localhost` (`0.0.0.0` in bundles) | Listen address. |
+| `--sse-port` (`SSE_PORT` in wrappers) | `8000` (`8100` in bundles) | Listen port. |
+| `--mcp-path` (`MCP_PATH` in wrappers) | `/mcp` | Endpoint path for `streamable-http`. |
+| `--log-level` (`LOG_LEVEL` in wrappers) | `INFO` | Log level. |
+| `--access-mode` | `unrestricted` | `restricted` rejects write SQL. |
+| `ST_DYNAMIC_ENABLED` | off | Enable per-request targets. |
+| `ST_DYNAMIC_ALLOW` | empty | Target host allow-list. |
+| `ST_DYNAMIC_ALLOW_PORTS` | `2003` | Target port allow-list. |
+| `ST_DYNAMIC_DEFAULT_PORT` | `2003` | Port when the request omits it. |
+| `ST_DYNAMIC_DEFAULT_DB` | `OSRDB` | Database when the request omits it. |
+| `ST_DYNAMIC_ACCESS_MODE` | follows `--access-mode` | SQL mode for dynamic targets. |
+| `ST_DYNAMIC_ALLOW_DEFAULT` | `no` | Open the server's own connection at startup; it does not accept tokenless requests while dynamic connections are enabled. |
+| `ST_MAX_TARGETS` | `16` | Connection-pool cap. |
+| `ST_TENANT_REGISTRY` / `--tenant-registry` | unset | Tenant registry JSON. |
+| `ST_ALLOW_DEFAULT` | `0` | `1` accepts tokenless requests as `ST_DEFAULT_TENANT`; needs a tenant registry. |
+| `ST_DEFAULT_TENANT` | unset | Registry tenant used for tokenless requests. |
+
+`SSE_HOST`, `SSE_PORT`, `MCP_PATH` and `LOG_LEVEL` are read by the bundled
+wrappers (`run.sh`, `docker/entrypoint.sh`, `scripts\start-server.ps1`), which pass
+them to the flags above; the Python CLI itself reads only the flags.
+
+### Docker deployment
+
+`deploy.conf` holds the container settings, `secrets/st-mcp.env` holds the
+password (mode `600`). The default configuration installs a ShenTong database on
+the same host and connects to it; to use an existing server set `ST_HOST`,
+`ST_PORT`, `ST_USER`, `ST_DB` and `INSTALL_SHENTONG=no`.
 
 ```sh
 cp secrets/st-mcp.env.example secrets/st-mcp.env
-vi secrets/st-mcp.env                   # 只改 ST_PASSWORD= 这一行
+vi secrets/st-mcp.env                    # ST_PASSWORD only
 chmod 600 secrets/st-mcp.env
-```
-
-**3) 部署**
-
-```sh
-sh install-all.sh
-```
-
-期望最后三行：
-
-```
-===== 验收汇总：19 PASS / 0 FAIL / 0 SKIP =====
-[..:..:..] 部署完成：实例 主 的 MCP 端点 http://127.0.0.1:8100/mcp
-[..:..:..] 连的库：SYSDBA@127.0.0.1:2003/OSRDB
-```
-
-**4) 客户端填 URL**
-
-```json
-{ "mcpServers": { "shentong": { "url": "http://<服务器IP>:8100/mcp" } } }
-```
-
-验证服务端真能查库（纯 curl，不依赖任何 MCP 客户端）：
-
-```sh
+sh install-all.sh                        # build image, start container, run the self-check
 sh tools/curl-mcp-probe.sh http://127.0.0.1:8100/mcp
-# 判据：第 4 步返回里有 "isError":false 和版本行
 ```
 
+Rules that are easy to get wrong:
 
-## 默认配置连的是哪个库（先看清，别改错文件）
+- Changing `deploy.conf` requires re-running `install-all.sh`; it is idempotent.
+- Inside the container, `127.0.0.1` means the container. The entrypoint rewrites
+  it to `ST_HOST_GATEWAY` (default `172.17.0.1`) so a database on the host is
+  reachable.
+- A database on the host must listen on `0.0.0.0:2003`, not `127.0.0.1:2003`.
 
-`deploy.conf` 出厂默认 = **在这台机器上现装一个神通库并连它**
-（`ST_HOST=127.0.0.1`、`ST_PORT=2003`、`ST_DB=OSRDB`、`ST_USER=SYSDBA`、
-`INSTALL_SHENTONG=yes`、`HOST_PORT=8100`、`TRANSPORT=streamable-http`、`MCP_PATH=/mcp`、
-`ACCESS_MODE=unrestricted`）。
+For multi-instance setups and troubleshooting see [`RUNBOOK.md`](RUNBOOK.md) and
+[`docs/07-动态连接.md`](docs/07-动态连接.md) (Chinese; the rules match this README).
 
-| 场景 | 要做什么 | 改哪几行 |
+## Protocol notes
+
+| Request | Result | Meaning |
 |---|---|---|
-| A 本机装库并连它 | 什么都不改，直接 `sh install-all.sh` | — |
-| B 连另一台已装好的库 | 不装库，只当网关 | `ST_HOST=<库机IP>`（+ 需要时 `ST_PORT/ST_DB/ST_USER`）、`INSTALL_SHENTONG=no` |
-| C 一台机器连多个库 | 首选动态连接（一个容器即可）；需要独立 token/实例隔离时再一库一容器 | 动态：`ST_DYNAMIC_ENABLED=yes` + `ST_DYNAMIC_ALLOW`；多实例：`sh scripts/new-instance.sh erp <库IP>` |
+| `POST /mcp` | `200` | Normal `streamable-http` handshake. |
+| `GET /mcp` | `401` / `406` | Without a token or target: `401`. With a valid token/target the transport answers `406` (POST only). |
+| `POST /sse` | `405` | The server is running `sse`; use the `/sse` endpoint. |
+| `/mcp` | `404` | The server is running `sse` or another path. |
+| `/mcp` | `421` | Host header rejected; use a current build. |
 
-场景 B 的两个坑：`ST_HOST` 填成 `127.0.0.1` 会被入口脚本改写成 `172.17.0.1`（于是去连本机库，
-报 `connection refused`）；`INSTALL_SHENTONG` 忘了改 `no` 会在这台机器上白装一个库。
-改完 `deploy.conf` 必须重跑 `sh install-all.sh` 才生效（幂等，会重建镜像并重启容器）。
+## Security
 
+- With dynamic connections disabled and no tenant registry, the server performs
+  **no authentication**: anyone who can reach the port can use the tools. Restrict
+  access with a firewall, or configure a tenant registry so callers need a token.
+- With dynamic connections enabled every request must carry a target or token, but
+  the target itself is a database credential: anyone who knows an account for a
+  host inside `ST_DYNAMIC_ALLOW` can use it.
+- Tenant isolation in this edition is only a routing mechanism. The caller must
+  still be authorized by the database account privileges.
+- Dynamic targets let a caller choose any database allowed by the allow-list.
+  Keep `ST_DYNAMIC_ALLOW` as narrow as possible and never expose the port to the
+  internet.
+- The server does not log passwords. Still, prefer HTTPS or a trusted network:
+  passwords and tokens travel in headers or URLs.
 
-## 动态连接：一个实例连多个库
+## Limitations
 
-客户端在请求头或 URL 里带目标库的 IP/端口/账号，同一个进程就按请求切换数据库：
+- No vendor database media, `STPython` wheel or `libaci.so` in this repository.
+- The vendor driver published for Linux aarch64 is CPython 3.11 only.
+- Windows SQL execution needs the ShenTong Windows client (`ACI.dll`).
+- The bundled ShenTong media (if you supply it) carries a 90-day trial license.
 
-```bash
-# 分字段头
--H 'X-ST-DB-Host: 10.0.0.21' -H 'X-ST-DB-Port: 2003' \
--H 'X-ST-DB-User: APP' -H 'X-ST-DB-Password: secret' -H 'X-ST-DB-Name: OSRDB'
-
-# 单头（口令含中文时必须用这个，HTTP 头值只能是 latin-1）
--H 'X-ST-DB: base64url({"host":"10.0.0.21","port":2003,"user":"APP","password":"口令","database":"OSRDB"})'
-
-# URL
-http://服务器:8100/mcp?st_host=10.0.0.21&st_port=2003&st_user=APP&st_password=secret&st_db=OSRDB
-```
-
-默认**白名单**只放行 `127.0.0.1:2003`；加 IP/CIDR 到 `ST_DYNAMIC_ALLOW` 才放行，
-端口用 `ST_DYNAMIC_ALLOW_PORTS`。不带目标、不带 token 的请求在 `ALLOW_DEFAULT=no`（默认）下返回 401。
-租户 token 的优先级高于动态目标。完整规则、状态码、容器内 `127.0.0.1` 重映射和连接池说明见
-[`docs/07-动态连接.md`](docs/07-动态连接.md)。
-
-真机探针（口令只从 stdin/$ST_PASSWORD 读，不进 argv）：
+## Development
 
 ```sh
-ST_PASSWORD='...' python3 scripts/probe-dynamic.py --base http://127.0.0.1:8100 \
-    --host 127.0.0.1 --user SYSDBA --db OSRDB
+PYTHONPATH=src sh -c 'for t in src/test/test_*.py; do python "$t"; done'
+sh -n install-all.sh scripts/*.sh docker/entrypoint.sh
+sh .secrets-scan.sh
 ```
 
+Shell scripts must run under POSIX `/bin/sh` (no process substitution, no bash
+arrays). External output parsed for English keywords must pin `LC_ALL=C`.
 
-## 协议与状态码（接客户端最容易踩的一段）
-
-服务端两种传输二选一，一个容器一次只讲一种：
-
-| 现象 | 容器实际在跑的 | 结论 |
-|---|---|---|
-| `POST /mcp` → 200 | streamable-http | 正常（默认） |
-| `GET /mcp` → **406** | streamable-http | **正常**，只收 POST，别用浏览器探活 |
-| `POST /sse` → **405** | sse | 客户端讲的是 streamable-http，URL 换 `/mcp` |
-| `/mcp` → 404 | sse | 这台机器没有 `/mcp` 路由，切 `TRANSPORT=streamable-http` |
-| `/mcp` → 421 | 旧镜像 | Host 白名单只放行 127.0.0.1：重建镜像（本仓库源码已规避；**本地 127.0.0.1 测不出，跨机第一次就要用真实 IP 测**） |
-
-只会讲 sse 的老客户端：给它是 `TRANSPORT=sse` 的实例，不要改主实例。
-
-
-## 发行版（Release）
-
-每个 Release 附带 5 个产物，**都不含**神通数据库本体、`STPython` 驱动和 `libaci.so`：
-
-| 产物 | 内容 |
-|---|---|
-| `st-mcp-<ver>-source.tar.gz` | 完整源码（同 git tag） |
-| `st-mcp-<ver>-py3-none-any.whl` | 通用 wheel，可装进任意 Python ≥3.11 |
-| `st-mcp-<ver>-linux-arm64.tar.gz` | 源码 + 便携 CPython 3.11 + 开源依赖 + `install.sh`/`run.sh` |
-| `st-mcp-<ver>-linux-x86_64.tar.gz` | 同上，x86_64 |
-| `st-mcp-<ver>-windows-x64.zip` | 便携 Python 3.13 + 依赖 + 一键启动/验收脚本 + 源码 |
-
-Linux 包解压后 `sh install.sh && sh run.sh`；Windows 包解压后双击 `一键启动.bat`。
-没有厂商驱动时服务仍可启动并完成 MCP 握手、动态连接校验，只是不能执行真实 SQL。
-
-发布前的本机实测（Release v0.1.0 对应的资产，均在离线条件下安装）：
-
-| 平台 | 环境 | 结果 |
-|---|---|---|
-| linux-arm64 | 麒麟 V10（glibc 2.28，ARM64） | `install.sh` 离线安装成功；26 个单元测试全过；`initialize` 判据 401（无目标）/200（header）/200（单头 base64url）/403（白名单外） |
-| linux-x86_64 | Ubuntu（WSL1，x86_64） | `install.sh` 离线安装成功；26 个单元测试全过；`initialize` 判据 401/200/200/403/400（缺字段） |
-| windows-x64 | Windows 10 x64，无厂商驱动 | 自带 `verify.ps1` 7 PASS / 0 FAIL / 2 SKIP（跳过项为需厂商驱动的真实 SQL）；服务在 8100 正常起停 |
-
-本地重新打包（需要预先准备便携 Python 与各架构轮子目录）：
+Rebuild the release assets locally (requires the portable Python archives and
+per-architecture wheel directories):
 
 ```sh
-VER=0.1.0 ARM64_PY_TGZ=... X64_PY_TGZ=... \
+VER=0.1.1 ARM64_PY_TGZ=... X64_PY_TGZ=... \
 ARM64_WHEELS=... X64_WHEELS=... WIN_BUNDLE=... \
 sh tools/build-release.sh
 ```
 
+## License
 
-## 目录
-
-    install-all.sh              一条命令完成装库/建镜像/起容器/19 项自验收
-    deploy.conf                 主实例参数（不含口令）
-    docker/                     Dockerfile.offline + entrypoint.sh（含 127.0.0.1 → 172.17.0.1 改写）
-    scripts/                    build-image / verify / new-instance / list-instances / common
-    shentong/install-shentong.sh 解压介质 → 装 → CREATE DATABASE → 初始化 → 起服务（含小内存保护）
-    src/st_mcp/                 Python 源码；src/test/ 16 项无依赖自测
-    wheels/ images/ aci/ vendor/ 二进制投递位，仓库不含二进制，各自 README 说明
-    tools/                      curl-mcp-probe.sh（握手链验证）、diag-2003.sh（只读诊断）、fetch-offline-deps.sh
-    docs/07-动态连接.md          header/URL 指定目标库的完整规则
-    windows/                    Windows 一键启动脚本与配置（便携 env 需另行组装）
-    RUNBOOK.md                  运维手册（状态/日志/升级/多实例/回退/安全边界）
-    PATCH-NOTES.md              改造记录与踩坑（含中文 locale 让整包校验静默失效那一条）
-
-
-## 已知边界
-
-- 驱动只覆盖厂商发布过的组合（当前 **cp311 + linux_aarch64**）；x86_64 要换该架构的驱动与 ACI。
-- Windows：x64 用 `windows/` 下的一键脚本；SQL 依赖神通 Windows 客户端自带的 `ACI.dll`，
-  只有协议层（启动、路由、401/403）不需要它。
-- **不做任何鉴权**：监听 `0.0.0.0:8100`，能连到这个端口的人都能用那 10 个工具查这块库。
-  内网部署的取舍，需要收窄请用防火墙按源地址放行，或用 `ACCESS_MODE=restricted` 走只读。
-- 数据库口令只在 `secrets/*.env`（600），不进配置文件、命令行和日志；含 `@ : / # % ! $ 空格 中文`
-  的口令按原样使用，不需要转义。
-- 厂商介质自带**试用 license**（版本串 `license invalid after 90 days`），到期后库拒起。
-
-
-## 开发 / 贡献
-
-```sh
-PYTHONPATH=src sh -c 'for t in src/test/test_*.py; do python "$t"; done'   # 16 项自测
-sh -n install-all.sh scripts/*.sh docker/entrypoint.sh                     # POSIX sh + bash 双跑
-sh .secrets-scan.sh                                                        # 提交前哨兵
-```
-
-脚本必须能在 `/bin/sh`（dash/ash）下跑：不用进程替换、不用 bash 数组。
-判据里凡解析外部命令输出的英文关键字都要钉 `LC_ALL=C`（麒麟中文环境会把 `OK/FAILED` 译成
-`确定/失败`，整包校验因此静默失效过一次）。
-
-MIT 许可，见 `LICENSE` 与 `NOTICE.md`。
+MIT — see [`LICENSE`](LICENSE). `src/` is derived from vendor-delivered code;
+scope and attribution are in [`NOTICE.md`](NOTICE.md).

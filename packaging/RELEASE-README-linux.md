@@ -10,8 +10,8 @@
 ## 快速开始
 
 ```sh
-tar -xzf st-mcp-0.1.0-{PLATFORM}.tar.gz
-cd st-mcp-0.1.0-{PLATFORM}
+tar -xzf st-mcp-{VER}-{PLATFORM}.tar.gz
+cd st-mcp-{VER}-{PLATFORM}
 sh install.sh          # 把依赖装进随包 Python，不联网
 sh run.sh              # 默认 0.0.0.0:8100/mcp
 ```
@@ -36,10 +36,10 @@ ST_DYNAMIC_ALLOW='*' ST_DYNAMIC_ALLOW_PORTS='*' sh run.sh
 | `source/` | 完整源码（`src/`、部署脚本、文档） |
 | `runtime/` | 便携 CPython 3.11（{PLATFORM}）压缩包，首次 `install.sh` 自动解压 |
 | `wheels/` | 开源依赖轮子 + `requirements.txt` |
-| `dist/` | `st_mcp-0.1.0-py3-none-any.whl` |
+| `dist/` | `st_mcp-{VER}-py3-none-any.whl` |
 | `install.sh` / `run.sh` | 离线安装 / 启动 |
 
 ## 非 Docker 方式
 
 本包用便携 Python 直接运行，适合没有 Docker 的机器。需要 Docker 的完整部署
-（装库、建镜像、19 项自验收）见 `source/README.md` 和 `source/RUNBOOK.md`。
+（装库、建镜像、跑自验收）见 `source/README.md` 和 `source/RUNBOOK.md`。
